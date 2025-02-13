@@ -25,6 +25,7 @@ fn unzip(input: impl AsRef<Path>) -> anyhow::Result<()> {
             &input.to_string_lossy(),
             "-DestinationPath",
             DOWNLOAD_PATH,
+            "-Force",
         ])
         .status()?;
 
