@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::Path,
-    process::Command,
+    process::{exit, Command},
     time::{Duration, Instant},
 };
 
@@ -140,10 +140,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     if Path::new(BINARY_PATH).exists() {
-        let mut repak = Command::new(BINARY_PATH)
+        let repak = Command::new(BINARY_PATH)
             .args(env::args().skip(1))
-            .spawn()?;
-        repak.wait()?;
+            .status()?;
+        exit(repak.code().unwrap_or(1));
     } else {
         println!("repak binary not found.");
     }
