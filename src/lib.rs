@@ -77,10 +77,11 @@ pub fn get_remote(
         .header("User-Agent", USER_AGENT);
 
     let request = if let Some(api_key) = api_key {
-        request.bearer_auth(api_key).build()
+        request.bearer_auth(api_key)
     } else {
-        request.build()
-    }?;
+        request
+    }
+    .build()?;
 
     let resp = client.execute(request)?;
     match resp.status() {
