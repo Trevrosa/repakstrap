@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::anyhow;
-use const_format::concatcp;
 use futures_util::StreamExt;
 use humantime::format_duration;
 use repakstrap::{
@@ -40,7 +39,7 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
     if unarchiver.is_ok_and(|s| s.code() == Some(0)) {
         #[cfg(target_os = "linux")]
         {
-            let linux_files = Path::new(concatcp!(
+            let linux_files = Path::new(const_format::concatcp!(
                 DOWNLOAD_PATH,
                 "repak_cli-x86_64-unknown-linux-gnu"
             ));
