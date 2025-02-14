@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{stdout, Write},
     path::Path,
-    process::{exit, Command},
+    process::{exit, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -30,10 +30,12 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
             DOWNLOAD_PATH,
             "-Force",
         ])
+        .stdout(Stdio::null())
         .status();
     #[cfg(target_os = "linux")]
     let unarchiver = Command::new("tar")
         .args(["xf", &input.to_string_lossy(), "-C", DOWNLOAD_PATH])
+        .stdout(Stdio::null())
         .status();
 
     if unarchiver.is_ok_and(|s| s.code() == Some(0)) {
@@ -66,13 +68,15 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
 async fn check_updates(client: &Client) -> anyhow::Result<()> {
     let local_version = get_local_version();
 
-    let remote = if let Ok(api_key) = env::var(APIKEY_ENV_VAR) {
-        println!("using env api key.");
-        get_remote(client, Some(api_key))
-    } else {
-        get_remote(client, None)
-    }
-    .await?;
+    // let remote = if let Ok(api_key) = env::var(APIKEY_ENV_VAR) {
+    //     println!("using env api key.");
+    //     get_remote(client, Some(api_key))
+    // } else {
+    //     get_remote(client, None)
+    // }
+    // .await?;
+
+    let remote = get_remote(client, None).await?;
 
     let remote_version = get_remote_version(&remote)?;
 
@@ -84,7 +88,7 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
         let download_start = Instant::now();
 
         let mut stdout = stdout().lock();
-        writeln!(stdout, "starting download")?;
+        writeln!(stdout, "\nstarting download")?;
 
         let downloaded = client.get(&download.browser_download_url).send().await?;
 
@@ -119,7 +123,7 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
         if let Err(err) = unarchive(output) {
             println!("errors: {}\n", get_error_chain(&err));
         }
-        writeln!(stdout, "extracted archive.")?;
+        writeln!(stdout, "extracted.\n")?;
 
         // drop stdout lock
         drop(stdout);
@@ -130,18 +134,20 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
     match local_version {
         Ok(local_version) => {
             if remote_version > local_version {
-                println!("found update {remote_version}");
+                println!("found new version {remote_version}");
                 download_and_unzip.await?;
+                println!("summary: repak {local_version} => {remote_version}");
             } else {
                 println!("you have the latest repak ({local_version})");
             }
         }
         Err(err) => {
             println!(
-                "could not find local version!\nerrors: {}\n",
+                "could not find local version!\nerrors: {}",
                 get_error_chain(&err)
             );
             download_and_unzip.await?;
+            println!("summary: got the latest repak {remote_version}");
         }
     }
 
@@ -163,7 +169,7 @@ async fn inner_main() -> anyhow::Result<()> {
         // we are ok with update check failing
         if let Err(err) = check_updates(&Client::new()).await {
             println!(
-                "failed to check for updates!\nerrors: {}\n",
+                "failed to check for updates!\nerrors: {}",
                 get_error_chain(&err)
             );
         }
@@ -176,6 +182,7 @@ async fn inner_main() -> anyhow::Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     // force update
     let args = if args.first().is_some_and(|a| a == "-U") {
+        println!("forcing update checks.");
         do_checks_and_download.await?;
         // skip the -U
         &args[1..]
@@ -185,7 +192,7 @@ async fn inner_main() -> anyhow::Result<()> {
         let last_checked =
             checked_marker.map_or(None, |m| m.modified().map_or(None, |t| t.elapsed().ok()));
 
-        // if `CHECKED_MARKER` exists but was modified less than `CHECK_COOLDOWN` ago, skip checks.
+        // if `CHECKED_MARKER` exists and was modified less than `CHECK_COOLDOWN` ago, we can skip checks.
         match last_checked {
             Some(last_checked) if last_checked < CHECK_COOLDOWN => {
                 println!(
@@ -195,6 +202,7 @@ async fn inner_main() -> anyhow::Result<()> {
             }
             // not less than `CHECK_COOLDOWN`
             Some(_) => do_checks_and_download.await?,
+            // `CHECKED_MARKER` doesn't exist or something went wrong getting modified time.
             None => do_checks_and_download.await?,
         }
         &args

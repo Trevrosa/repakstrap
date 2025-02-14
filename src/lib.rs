@@ -23,14 +23,18 @@ pub fn get_error_chain(err: &anyhow::Error) -> String {
 }
 
 pub fn get_local_version() -> anyhow::Result<Version> {
-    let cli_version = Command::new(BINARY_PATH).arg("--version").output()?.stdout;
+    let cli_version = Command::new(BINARY_PATH)
+        .arg("--version")
+        .output()
+        .map_err(|err| anyhow!("tried to run `./dist/repak -V`").context(err))?
+        .stdout;
     let cli_version = String::from_utf8_lossy(&cli_version);
 
     let cli_version = cli_version
         .trim()
         .split(' ')
         .last()
-        .ok_or(anyhow!("could not find local version."))?;
+        .ok_or(anyhow!("could not parse local version."))?;
 
     Ok(Version::parse(cli_version)?)
 }
@@ -55,11 +59,8 @@ pub fn find_download(assets: impl IntoIterator<Item = GithubAsset>) -> Option<Gi
     #[cfg(target_os = "linux")]
     const BINARY_END: &str = "linux-gnu.tar.xz";
 
-    assets
-        .into_iter()
-        .find(|a| a.name.ends_with(BINARY_END))
+    assets.into_iter().find(|a| a.name.ends_with(BINARY_END))
 }
-
 
 pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Result<GithubRelease> {
     const RELEASES_URL: &str =
