@@ -37,7 +37,7 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
         .status();
 
     if unarchiver.is_ok_and(|s| s.code() == Some(0)) {
-        #[cfg(target_os = "linux")]
+        // #[cfg(target_os = "linux")]
         {
             let linux_files = Path::new(const_format::concatcp!(
                 DOWNLOAD_PATH,
@@ -49,8 +49,8 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
                     fs::rename(
                         file.path(),
                         file.path()
-                            .parent()
-                            .ok_or(anyhow!("{:?} no parent", file.path()))?,
+                            .to_string_lossy()
+                            .replace("repak_cli-x86_64-unknown-linux-gnu", ""),
                     )?;
                 }
             }
