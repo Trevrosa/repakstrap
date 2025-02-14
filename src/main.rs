@@ -17,11 +17,11 @@ use repakstrap::{
 use reqwest::{self, Client};
 use tokio::runtime;
 
-fn unzip(input: impl AsRef<Path>) -> anyhow::Result<()> {
+fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
     let input = input.as_ref();
 
     #[cfg(windows)]
-    let unzip = Command::new("powershell")
+    let unarchiver = Command::new("powershell")
         .args([
             "-Command",
             "Expand-Archive",
@@ -32,11 +32,11 @@ fn unzip(input: impl AsRef<Path>) -> anyhow::Result<()> {
         ])
         .status();
     #[cfg(target_os = "linux")]
-    let unzip = Command::new("unzip")
-        .args([&input.to_string_lossy(), "-d", DOWNLOAD_PATH])
+    let unarchiver = Command::new("tar")
+        .args(["xf", &input.to_string_lossy(), "-C", DOWNLOAD_PATH])
         .status();
 
-    if unzip.is_ok_and(|s| s.code() == Some(0)) {
+    if unarchiver.is_ok_and(|s| s.code() == Some(0)) {
         Ok(())
     } else {
         Err(anyhow!("unzip failed"))
@@ -97,7 +97,7 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
 
         println!("\ndone! took {:?}", download_start.elapsed());
 
-        if let Err(err) = unzip(output) {
+        if let Err(err) = unarchive(output) {
             println!("errors: {}\n", get_error_chain(&err));
         }
         println!("unzipped.");

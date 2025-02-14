@@ -8,7 +8,10 @@ use serde::Deserialize;
 
 pub const DOWNLOAD_PATH: &str = "./dist/";
 pub const CHECKED_MARKER: &str = concatcp!(DOWNLOAD_PATH, "CHECKED");
+#[cfg(windows)]
 pub const BINARY_PATH: &str = concatcp!(DOWNLOAD_PATH, "repak.exe");
+#[cfg(target_os = "linux")]
+pub const BINARY_PATH: &str = concatcp!(DOWNLOAD_PATH, "repak");
 pub const APIKEY_ENV_VAR: &str = "REPAKSTRAP_APIKEY";
 
 pub fn get_error_chain(err: &anyhow::Error) -> String {
@@ -47,9 +50,14 @@ pub struct GithubRelease {
 }
 
 pub fn find_download(assets: impl IntoIterator<Item = GithubAsset>) -> Option<GithubAsset> {
+    #[cfg(windows)]
+    const BINARY_END: &str = "windows-msvc.zip";
+    #[cfg(target_os = "linux")]
+    const BINARY_END: &str = "linux-gnu.tar.xz";
+
     assets
         .into_iter()
-        .find(|a| a.name.contains("windows-msvc.zip"))
+        .find(|a| a.name.ends_with(BINARY_END))
 }
 
 // allow unauthenticated api requests to github.
