@@ -60,13 +60,12 @@ pub fn find_download(assets: impl IntoIterator<Item = GithubAsset>) -> Option<Gi
         .find(|a| a.name.ends_with(BINARY_END))
 }
 
-// allow unauthenticated api requests to github.
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0";
 
 pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Result<GithubRelease> {
     const RELEASES_URL: &str =
         "https://api.github.com/repos/natimerry/repak-rivals/releases/latest";
+    const USER_AGENT: &str =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0";
     let request = client
         .request(Method::GET, RELEASES_URL)
         .header("Accept", "application/vnd.github+json")

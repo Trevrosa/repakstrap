@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::anyhow;
+use const_format::concatcp;
 use futures_util::StreamExt;
 use humantime::format_duration;
 use repakstrap::{
@@ -37,6 +38,26 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
         .status();
 
     if unarchiver.is_ok_and(|s| s.code() == Some(0)) {
+        #[cfg(target_os = "linux")]
+        {
+            let linux_files = Path::new(concatcp!(
+                DOWNLOAD_PATH,
+                "repak_cli-x86_64-unknown-linux-gnu"
+            ));
+            for file in linux_files.read_dir()? {
+                let file = file?;
+                if file.path().is_file() {
+                    fs::rename(
+                        file.path(),
+                        file.path()
+                            .parent()
+                            .ok_or(anyhow!("{:?} no parent", file.path()))?,
+                    )?;
+                }
+            }
+            fs::remove_dir(linux_files)?;
+        }
+
         Ok(())
     } else {
         Err(anyhow!("unzip failed"))
@@ -63,19 +84,21 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
 
         let download_start = Instant::now();
 
+        let mut stdout = stdout().lock();
+        writeln!(stdout, "starting download")?;
+
         let downloaded = client.get(&download.browser_download_url).send().await?;
+
         let download_size = downloaded
             .content_length()
             .ok_or(anyhow!("could not get content_length"))?;
-        
-        let mut stdout = stdout().lock();
 
         let msg = format!("downloading {remote_version}/{}", download.name);
-        writeln!(stdout, "starting download")?;
 
         let output = format!("{DOWNLOAD_PATH}/{}", download.name);
         let mut file = File::create(&output)?;
 
+        let term_cols = termsize::get().map_or(0, |s| s.cols as usize);
         let mut progress = 0;
 
         let mut bytes_stream = downloaded.bytes_stream();
@@ -83,24 +106,24 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
             let chunk = chunk?;
             file.write_all(&chunk)?;
             progress += chunk.len();
-            write!(
-                stdout,
-                "\r{msg}, {} bytes left",
-                download_size - progress as u64
-            )?;
+
+            let msg = format!("\r{msg}, {} bytes left", download_size - progress as u64);
+            write!(stdout, "{msg}{}", " ".repeat(term_cols - msg.len()))?;
             stdout.flush()?;
         }
 
-        // close file, stdout lock
+        // close file
         drop(file);
-        drop(stdout);
 
-        println!("\ndone! took {:?}", download_start.elapsed());
+        writeln!(stdout, "\ndone! took {:?}", download_start.elapsed())?;
 
         if let Err(err) = unarchive(output) {
             println!("errors: {}\n", get_error_chain(&err));
         }
-        println!("unzipped.");
+        writeln!(stdout, "extracted archive.")?;
+
+        // drop stdout lock
+        drop(stdout);
 
         Ok(())
     };
