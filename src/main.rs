@@ -68,15 +68,13 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
 async fn check_updates(client: &Client) -> anyhow::Result<()> {
     let local_version = get_local_version();
 
-    // let remote = if let Ok(api_key) = env::var(APIKEY_ENV_VAR) {
-    //     println!("using env api key.");
-    //     get_remote(client, Some(api_key))
-    // } else {
-    //     get_remote(client, None)
-    // }
-    // .await?;
-
-    let remote = get_remote(client, None).await?;
+    let remote = if let Ok(api_key) = env::var(APIKEY_ENV_VAR) {
+        println!("using env api key.");
+        get_remote(client, Some(api_key))
+    } else {
+        get_remote(client, None)
+    }
+    .await?;
 
     let remote_version = get_remote_version(&remote)?;
 
