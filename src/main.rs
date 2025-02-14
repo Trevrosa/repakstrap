@@ -173,28 +173,37 @@ async fn inner_main() -> anyhow::Result<()> {
         Ok::<(), anyhow::Error>(())
     };
 
-    let checked_marker = fs::metadata(CHECKED_MARKER);
-    // if we get any errors getting the modified time, default on doing the checks.
-    let last_checked =
-        checked_marker.map_or(None, |m| m.modified().map_or(None, |t| t.elapsed().ok()));
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    // force update
+    let args = if args.first().is_some_and(|a| a == "-U") {
+        do_checks_and_download.await?;
+        // skip the -U
+        &args[1..]
+    } else {
+        let checked_marker = fs::metadata(CHECKED_MARKER);
+        // if we get any errors getting the modified time, default on doing the checks.
+        let last_checked =
+            checked_marker.map_or(None, |m| m.modified().map_or(None, |t| t.elapsed().ok()));
 
-    // if `CHECKED_MARKER` exists but was modified less than `CHECK_COOLDOWN` ago, skip checks.
-    match last_checked {
-        Some(last_checked) if last_checked < CHECK_COOLDOWN => {
-            println!(
-                "skipped checks, last checked `{}` ago.\n",
-                format_duration(last_checked)
-            );
+        // if `CHECKED_MARKER` exists but was modified less than `CHECK_COOLDOWN` ago, skip checks.
+        match last_checked {
+            Some(last_checked) if last_checked < CHECK_COOLDOWN => {
+                println!(
+                    "skipped checks, last checked `{}` ago.\n",
+                    format_duration(last_checked)
+                );
+            }
+            // not less than `CHECK_COOLDOWN`
+            Some(_) => do_checks_and_download.await?,
+            None => do_checks_and_download.await?,
         }
-        // not less than `CHECK_COOLDOWN`
-        Some(_) => do_checks_and_download.await?,
-        None => do_checks_and_download.await?,
-    }
+        &args
+    };
 
     if Path::new(BINARY_PATH).exists() {
         let repak = Command::new(BINARY_PATH)
             // the first arg is repakstrap
-            .args(env::args().skip(1))
+            .args(args)
             .status()?;
         exit(repak.code().unwrap_or(1));
     } else {
