@@ -1,15 +1,17 @@
 [package]
 name = "repakstrap"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.95"
 const_format = "0.2.34"
+futures-util = "0.3.31"
 humantime = "2.1.0"
-reqwest = { version = "0.12.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12.12", features = ["stream", "json"] }
 semver = "1.0.25"
 serde = { version = "1.0.217", features = ["derive"] }
+tokio = { version = "1.43.0", features = ["rt"] }
 
 [profile.release]
 codegen-units = 1

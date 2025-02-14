@@ -2,10 +2,7 @@ use std::process::Command;
 
 use anyhow::anyhow;
 use const_format::concatcp;
-use reqwest::{
-    blocking::{self, Response},
-    IntoUrl, Method, StatusCode,
-};
+use reqwest::{Client, Method, StatusCode};
 use semver::Version;
 use serde::Deserialize;
 
@@ -20,11 +17,6 @@ pub fn get_error_chain(err: &anyhow::Error) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" => ")
-}
-
-pub fn blocking_get_url(client: &blocking::Client, url: impl IntoUrl) -> anyhow::Result<Response> {
-    let request = client.get(url).build()?;
-    Ok(client.execute(request)?)
 }
 
 pub fn get_local_version() -> anyhow::Result<Version> {
@@ -64,10 +56,7 @@ pub fn find_download(assets: impl IntoIterator<Item = GithubAsset>) -> Option<Gi
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0";
 
-pub fn get_remote(
-    client: &blocking::Client,
-    api_key: Option<String>,
-) -> anyhow::Result<GithubRelease> {
+pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Result<GithubRelease> {
     const RELEASES_URL: &str =
         "https://api.github.com/repos/natimerry/repak-rivals/releases/latest";
     let request = client
@@ -83,16 +72,16 @@ pub fn get_remote(
     }
     .build()?;
 
-    let resp = client.execute(request)?;
+    let resp = client.execute(request).await?;
     match resp.status() {
         StatusCode::FORBIDDEN => Err(anyhow!(
             "got 403 on api request: {}",
-            resp.text().map_or_else(
+            resp.text().await.map_or_else(
                 |_| "no text could be parsed".to_string(),
                 |t| t.trim().to_string()
             )
         )),
-        StatusCode::OK => Ok(resp.json()?),
+        StatusCode::OK => Ok(resp.json().await?),
         status => Err(anyhow!("unhandled status {status}")),
     }
 }

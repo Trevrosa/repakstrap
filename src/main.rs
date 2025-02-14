@@ -1,23 +1,26 @@
 use std::{
     env,
     fs::{self, File},
-    io::Write,
+    io::{stdout, Write},
     path::Path,
     process::{exit, Command},
     time::{Duration, Instant},
 };
 
 use anyhow::anyhow;
+use futures_util::StreamExt;
 use humantime::format_duration;
 use repakstrap::{
-    blocking_get_url, find_download, get_error_chain, get_local_version, get_remote,
-    get_remote_version, APIKEY_ENV_VAR, BINARY_PATH, CHECKED_MARKER, DOWNLOAD_PATH,
+    find_download, get_error_chain, get_local_version, get_remote, get_remote_version,
+    APIKEY_ENV_VAR, BINARY_PATH, CHECKED_MARKER, DOWNLOAD_PATH,
 };
-use reqwest::blocking::{self, Client};
+use reqwest::{self, Client};
+use tokio::runtime;
 
 fn unzip(input: impl AsRef<Path>) -> anyhow::Result<()> {
     let input = input.as_ref();
 
+    #[cfg(windows)]
     let unzip = Command::new("powershell")
         .args([
             "-Command",
@@ -27,16 +30,20 @@ fn unzip(input: impl AsRef<Path>) -> anyhow::Result<()> {
             DOWNLOAD_PATH,
             "-Force",
         ])
-        .status()?;
+        .status();
+    #[cfg(target_os = "linux")]
+    let unzip = Command::new("unzip")
+        .args([&input.to_string_lossy(), "-d", DOWNLOAD_PATH])
+        .status();
 
-    if unzip.code() == Some(0) {
+    if unzip.is_ok_and(|s| s.code() == Some(0)) {
         Ok(())
     } else {
         Err(anyhow!("unzip failed"))
     }
 }
 
-fn check_updates(client: &blocking::Client) -> anyhow::Result<()> {
+async fn check_updates(client: &Client) -> anyhow::Result<()> {
     let local_version = get_local_version();
 
     let remote = if let Ok(api_key) = env::var(APIKEY_ENV_VAR) {
@@ -44,27 +51,55 @@ fn check_updates(client: &blocking::Client) -> anyhow::Result<()> {
         get_remote(client, Some(api_key))
     } else {
         get_remote(client, None)
-    }?;
+    }
+    .await?;
 
     let remote_version = get_remote_version(&remote)?;
 
-    let download_and_unzip = || {
+    let download_and_unzip = async {
         let Some(download) = find_download(remote.assets) else {
             return Err(anyhow!("could not find download url"));
         };
-        println!("downloading {}..", &download.browser_download_url);
 
         let download_start = Instant::now();
-        let downloaded = blocking_get_url(client, download.browser_download_url)?.bytes()?;
-        println!("done! took {:?}", download_start.elapsed());
+
+        let downloaded = client.get(&download.browser_download_url).send().await?;
+        let download_size = downloaded
+            .content_length()
+            .ok_or(anyhow!("could not get content_length"))?;
+        
+        let mut stdout = stdout().lock();
+
+        let msg = format!("downloading {remote_version}/{}", download.name);
+        writeln!(stdout, "starting download")?;
 
         let output = format!("{DOWNLOAD_PATH}/{}", download.name);
-
         let mut file = File::create(&output)?;
-        file.write_all(&downloaded)?;
-        drop(file);
 
-        unzip(output)?;
+        let mut progress = 0;
+
+        let mut bytes_stream = downloaded.bytes_stream();
+        while let Some(chunk) = bytes_stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk)?;
+            progress += chunk.len();
+            write!(
+                stdout,
+                "\r{msg}, {} bytes left",
+                download_size - progress as u64
+            )?;
+            stdout.flush()?;
+        }
+
+        // close file, stdout lock
+        drop(file);
+        drop(stdout);
+
+        println!("\ndone! took {:?}", download_start.elapsed());
+
+        if let Err(err) = unzip(output) {
+            println!("errors: {}\n", get_error_chain(&err));
+        }
         println!("unzipped.");
 
         Ok(())
@@ -74,7 +109,7 @@ fn check_updates(client: &blocking::Client) -> anyhow::Result<()> {
         Ok(local_version) => {
             if remote_version > local_version {
                 println!("found update {remote_version}");
-                download_and_unzip()?;
+                download_and_unzip.await?;
             } else {
                 println!("you have the latest repak ({local_version})");
             }
@@ -84,7 +119,7 @@ fn check_updates(client: &blocking::Client) -> anyhow::Result<()> {
                 "could not find local version!\nerrors: {}\n",
                 get_error_chain(&err)
             );
-            download_and_unzip()?;
+            download_and_unzip.await?;
         }
     }
 
@@ -96,17 +131,15 @@ fn check_updates(client: &blocking::Client) -> anyhow::Result<()> {
 // 1 hour
 const CHECK_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
-fn main() -> anyhow::Result<()> {
-    assert!(std::env::consts::OS == "windows", "tool only for windows!");
-
-    let do_checks_and_download = || -> anyhow::Result<()> {
+async fn inner_main() -> anyhow::Result<()> {
+    let do_checks_and_download = async {
         let download_path = Path::new(DOWNLOAD_PATH);
         if !download_path.exists() {
             fs::create_dir(download_path)?;
         }
 
         // we are ok with update check failing
-        if let Err(err) = check_updates(&Client::new()) {
+        if let Err(err) = check_updates(&Client::new()).await {
             println!(
                 "failed to check for updates!\nerrors: {}\n",
                 get_error_chain(&err)
@@ -115,33 +148,30 @@ fn main() -> anyhow::Result<()> {
 
         println!();
 
-        Ok(())
+        Ok::<(), anyhow::Error>(())
     };
 
     let checked_marker = fs::metadata(CHECKED_MARKER);
+    // if we get any errors getting the modified time, default on doing the checks.
     let last_checked =
         checked_marker.map_or(None, |m| m.modified().map_or(None, |t| t.elapsed().ok()));
 
     // if `CHECKED_MARKER` exists but was modified less than `CHECK_COOLDOWN` ago, skip checks.
-    // if we get any errors getting the modified time, default on doing the checks.
     match last_checked {
-        Some(last_checked) if last_checked >= CHECK_COOLDOWN => {
-            do_checks_and_download()?;
-        }
         Some(last_checked) if last_checked < CHECK_COOLDOWN => {
             println!(
                 "skipped checks, last checked `{}` ago.\n",
                 format_duration(last_checked)
             );
         }
-        Some(_) => panic!("should not be reachable"),
-        None => {
-            do_checks_and_download()?;
-        }
+        // not less than `CHECK_COOLDOWN`
+        Some(_) => do_checks_and_download.await?,
+        None => do_checks_and_download.await?,
     }
 
     if Path::new(BINARY_PATH).exists() {
         let repak = Command::new(BINARY_PATH)
+            // the first arg is repakstrap
             .args(env::args().skip(1))
             .status()?;
         exit(repak.code().unwrap_or(1));
@@ -150,4 +180,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let rt = runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .worker_threads(1)
+        .build()?;
+
+    rt.block_on(inner_main())
 }
