@@ -8,7 +8,7 @@ bootstrap [repak-rivals](https://github.com/natimerry/repak-rivals), updating on
 - will return the same exit code repak does
 - will update repak for you when updates are found
 - only do update checks *at most* once every hour
-- only ~5ms slower startup when updates are not checked (~1ms on linux).
+- ~7ms slower startup when updates are not checked (~1ms on linux).
 
 ## usage
 
