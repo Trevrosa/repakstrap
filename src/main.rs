@@ -12,14 +12,12 @@ use futures_util::StreamExt;
 use humantime::format_duration;
 use repakstrap::{
     find_download, get_error_chain, get_local_version, get_remote, get_remote_version,
-    APIKEY_ENV_VAR, BINARY_PATH, CHECKED_MARKER, DOWNLOAD_PATH,
+    APIKEY_ENV_VAR, BINARY_NAME, CHECKED_MARKER_NAME, DOWNLOADS_NAME,
 };
 use reqwest::{self, Client};
 use tokio::runtime;
 
-fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
-    let input = input.as_ref();
-
+fn unarchive(input: &Path, output: &Path) -> anyhow::Result<()> {
     #[cfg(windows)]
     let unarchiver = Command::new("powershell")
         .args([
@@ -27,46 +25,58 @@ fn unarchive(input: impl AsRef<Path>) -> anyhow::Result<()> {
             "Expand-Archive",
             &input.to_string_lossy(),
             "-DestinationPath",
-            DOWNLOAD_PATH,
+            &output.to_string_lossy(),
             "-Force",
         ])
         .stdout(Stdio::null())
         .status();
     #[cfg(target_os = "linux")]
     let unarchiver = Command::new("tar")
-        .args(["xf", &input.to_string_lossy(), "-C", DOWNLOAD_PATH])
+        .args([
+            "xf",
+            &input.to_string_lossy(),
+            "-C",
+            &output.to_string_lossy(),
+        ])
         .stdout(Stdio::null())
         .status();
 
-    if unarchiver.is_ok_and(|s| s.code() == Some(0)) {
-        #[cfg(target_os = "linux")]
-        {
-            let linux_files = Path::new(const_format::concatcp!(
-                DOWNLOAD_PATH,
-                "repak_cli-x86_64-unknown-linux-gnu"
-            ));
-            for file in linux_files.read_dir()? {
-                let file = file?;
-                if file.path().is_file() {
-                    fs::rename(
-                        file.path(),
-                        file.path()
-                            .to_string_lossy()
-                            .replace("repak_cli-x86_64-unknown-linux-gnu", ""),
-                    )?;
+    match unarchiver {
+        Ok(status) if status.code() == Some(0) => {
+            // the archived linux binaries are contained in a folder.
+            #[cfg(target_os = "linux")]
+            {
+                const INNER_DIR: &str = "repak_cli-x86_64-unknown-linux-gnu";
+                let linux_files = output.join(INNER_DIR);
+                for file in linux_files.read_dir()? {
+                    let file = file?;
+                    if file.path().is_file() {
+                        fs::rename(
+                            file.path(),
+                            file.path().to_string_lossy().replace(INNER_DIR, ""),
+                        )?;
+                    }
                 }
+                fs::remove_dir(linux_files)?;
             }
-            fs::remove_dir(linux_files)?;
-        }
 
-        Ok(())
-    } else {
-        Err(anyhow!("unzip failed"))
+            Ok(())
+        }
+        Ok(status) => Err(anyhow!(
+            "failed to extract {:?}, exited with code {status}",
+            input.file_name()
+        )),
+        Err(err) => Err(anyhow!("trying to extract {:?}", input.file_name()).context(err)),
     }
 }
 
-async fn check_updates(client: &Client) -> anyhow::Result<()> {
-    let local_version = get_local_version();
+async fn check_updates(
+    client: &Client,
+    download_path: &Path,
+    binary_path: &Path,
+    checked_marker_path: &Path,
+) -> anyhow::Result<()> {
+    let local_version = get_local_version(binary_path);
 
     let remote = if let Ok(api_key) = env::var(APIKEY_ENV_VAR) {
         println!("using env api key.");
@@ -96,8 +106,8 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
 
         let msg = format!("downloading {remote_version}/{}", download.name);
 
-        let output = format!("{DOWNLOAD_PATH}/{}", download.name);
-        let mut file = File::create(&output)?;
+        let download_output = download_path.join(download.name);
+        let mut file = File::create(&download_output)?;
 
         let term_cols = termsize::get().map_or(0, |s| s.cols as usize);
         let mut progress = 0;
@@ -118,7 +128,7 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
 
         writeln!(stdout, "\ndone! took {:?}", download_start.elapsed())?;
 
-        if let Err(err) = unarchive(output) {
+        if let Err(err) = unarchive(&download_output, download_path) {
             println!("errors: {}\n", get_error_chain(&err));
         }
         writeln!(stdout, "extracted.\n")?;
@@ -149,7 +159,7 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
         }
     }
 
-    fs::File::create(CHECKED_MARKER)?;
+    File::create(checked_marker_path)?;
 
     Ok(())
 }
@@ -158,14 +168,29 @@ async fn check_updates(client: &Client) -> anyhow::Result<()> {
 const CHECK_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
 async fn inner_main() -> anyhow::Result<()> {
+    let current_dir = env::current_exe()?;
+    let current_dir = current_dir
+        .parent()
+        .ok_or(anyhow!("could not get path of current executable."))?;
+
+    let download_path = current_dir.join(DOWNLOADS_NAME);
+    let binary_path = download_path.join(BINARY_NAME);
+    let checked_marker_path = download_path.join(CHECKED_MARKER_NAME);
+
     let do_checks_and_download = async {
-        let download_path = Path::new(DOWNLOAD_PATH);
         if !download_path.exists() {
-            fs::create_dir(download_path)?;
+            fs::create_dir(&download_path)?;
         }
 
         // we are ok with update check failing
-        if let Err(err) = check_updates(&Client::new()).await {
+        if let Err(err) = check_updates(
+            &Client::new(),
+            &download_path,
+            &binary_path,
+            &checked_marker_path,
+        )
+        .await
+        {
             println!(
                 "failed to check for updates!\nerrors: {}",
                 get_error_chain(&err)
@@ -185,7 +210,7 @@ async fn inner_main() -> anyhow::Result<()> {
         // skip the -U
         &args[1..]
     } else {
-        let checked_marker = fs::metadata(CHECKED_MARKER);
+        let checked_marker = fs::metadata(&checked_marker_path);
         // if we get any errors getting the modified time, default on doing the checks.
         let last_checked =
             checked_marker.map_or(None, |m| m.modified().map_or(None, |t| t.elapsed().ok()));
@@ -206,12 +231,15 @@ async fn inner_main() -> anyhow::Result<()> {
         &args
     };
 
-    if Path::new(BINARY_PATH).exists() {
-        let repak = Command::new(BINARY_PATH)
+    if binary_path.exists() {
+        let repak = Command::new(&binary_path)
             // the first arg is repakstrap
             .args(args)
-            .status()?;
-        exit(repak.code().unwrap_or(1));
+            .status();
+        match repak {
+            Ok(repak) => exit(repak.code().unwrap_or(1)),
+            Err(err) => println!("failed to run repak: {err}"),
+        }
     } else {
         println!("repak binary not found.");
     }

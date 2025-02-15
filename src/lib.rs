@@ -1,19 +1,24 @@
-use std::process::Command;
+#![allow(clippy::missing_errors_doc)]
+
+/// Contains deserializable github structs.
+mod github;
+
+use std::{path::Path, process::Command};
 
 use anyhow::anyhow;
-use const_format::concatcp;
+use github::{Release, ReleaseAsset};
 use reqwest::{Client, Method, StatusCode};
 use semver::Version;
-use serde::Deserialize;
 
-pub const DOWNLOAD_PATH: &str = "./dist/";
-pub const CHECKED_MARKER: &str = concatcp!(DOWNLOAD_PATH, "CHECKED");
+pub const DOWNLOADS_NAME: &str = "dist";
+pub const CHECKED_MARKER_NAME: &str = "CHECKED";
 #[cfg(windows)]
-pub const BINARY_PATH: &str = concatcp!(DOWNLOAD_PATH, "repak.exe");
+pub const BINARY_NAME: &str = "repak.exe";
 #[cfg(target_os = "linux")]
-pub const BINARY_PATH: &str = concatcp!(DOWNLOAD_PATH, "repak");
+pub const BINARY_NAME: &str = "repak";
 pub const APIKEY_ENV_VAR: &str = "REPAKSTRAP_APIKEY";
 
+/// Get a formatted error chain of an [`anyhow::Error`] in reverse.
 pub fn get_error_chain(err: &anyhow::Error) -> String {
     err.chain()
         .rev()
@@ -22,11 +27,31 @@ pub fn get_error_chain(err: &anyhow::Error) -> String {
         .join(" => ")
 }
 
-pub fn get_local_version() -> anyhow::Result<Version> {
-    let cli_version = Command::new(BINARY_PATH)
+trait PathExt {
+    /// Get a [`Path`]'s parent or return an empty path.
+    fn maybe_parent(&self) -> &Self;
+}
+
+impl PathExt for Path {
+    fn maybe_parent(&self) -> &Self {
+        self.parent().unwrap_or("".as_ref())
+    }
+}
+
+/// Get a repak binary's version as a [`semver::Version`]
+pub fn get_local_version(binary_path: &Path) -> anyhow::Result<Version> {
+    let cli_version = Command::new(binary_path)
         .arg("--version")
         .output()
-        .map_err(|err| anyhow!("tried to run `./dist/repak -V`").context(err))?
+        .map_err(|err| {
+            anyhow!(
+                "tried to run `{:?} -V`",
+                binary_path
+                    .strip_prefix(binary_path.maybe_parent().maybe_parent())
+                    .unwrap_or("no path".as_ref())
+            )
+            .context(err)
+        })?
         .stdout;
     let cli_version = String::from_utf8_lossy(&cli_version);
 
@@ -39,21 +64,8 @@ pub fn get_local_version() -> anyhow::Result<Version> {
     Ok(Version::parse(cli_version)?)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct GithubAsset {
-    pub name: String,
-    pub browser_download_url: String,
-}
-
-/// Does not contain all fields  
-#[derive(Debug, Deserialize)]
-pub struct GithubRelease {
-    pub name: String,
-    pub tag_name: String,
-    pub assets: Vec<GithubAsset>,
-}
-
-pub fn find_download(assets: impl IntoIterator<Item = GithubAsset>) -> Option<GithubAsset> {
+/// Find the correct [`ReleaseAsset`] to download from an [`Iterator`] of [`ReleaseAsset`]s according to the platform.
+pub fn find_download(assets: impl IntoIterator<Item = ReleaseAsset>) -> Option<ReleaseAsset> {
     #[cfg(windows)]
     const BINARY_END: &str = "windows-msvc.zip";
     #[cfg(target_os = "linux")]
@@ -62,7 +74,8 @@ pub fn find_download(assets: impl IntoIterator<Item = GithubAsset>) -> Option<Gi
     assets.into_iter().find(|a| a.name.ends_with(BINARY_END))
 }
 
-pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Result<GithubRelease> {
+/// Get the latest repak-rivals [`Release`].
+pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Result<Release> {
     const RELEASES_URL: &str =
         "https://api.github.com/repos/natimerry/repak-rivals/releases/latest";
     const USER_AGENT: &str =
@@ -94,8 +107,10 @@ pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Res
     }
 }
 
-pub fn get_remote_version(release: &GithubRelease) -> anyhow::Result<Version> {
-    // prefer tag name over release name      skip v (in 'v0.0.1')
+/// Parse a [`Release`] to get it's [`semver::Version`]
+pub fn get_remote_version(release: &Release) -> anyhow::Result<Version> {
+    // prefer tag name over release name
+    // use tag_name[1..] to skip the v (like in 'v0.0.1')
     let version =
         Version::parse(&release.tag_name[1..]).or_else(|_| Version::parse(&release.name))?;
     Ok(version)
