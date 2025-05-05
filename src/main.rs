@@ -11,13 +11,13 @@ use anyhow::anyhow;
 use futures_util::StreamExt;
 use humantime::format_duration;
 use repakstrap::{
-    find_download, get_error_chain, get_local_version, get_remote, get_remote_version,
+    find_downloads, get_error_chain, get_local_version, get_remote, get_remote_version,
     APIKEY_ENV_VAR, BINARY_NAME, CHECKED_MARKER_NAME, DOWNLOADS_NAME,
 };
 use reqwest::{self, Client};
 use tokio::runtime;
 
-fn unarchive(input: &Path, output: &Path) -> anyhow::Result<()> {
+fn extract_archive(input: &Path, output: &Path) -> anyhow::Result<()> {
     #[cfg(windows)]
     let unarchiver = Command::new("powershell")
         .args([
@@ -46,14 +46,18 @@ fn unarchive(input: &Path, output: &Path) -> anyhow::Result<()> {
             // the archived linux binaries are contained in a folder.
             #[cfg(target_os = "linux")]
             {
-                const INNER_DIR: &str = "repak_cli-x86_64-unknown-linux-gnu";
-                let linux_files = output.join(INNER_DIR);
+                let inner_dir = input
+                    .file_name()
+                    .expect("file has no name?")
+                    .to_string_lossy();
+                let inner_dir = inner_dir.split('.').next().expect("file has no extension?");
+                let linux_files = output.join(inner_dir);
                 for file in linux_files.read_dir()? {
                     let file = file?;
                     if file.path().is_file() {
                         fs::rename(
                             file.path(),
-                            file.path().to_string_lossy().replace(INNER_DIR, ""),
+                            file.path().to_string_lossy().replace(inner_dir, ""),
                         )?;
                     }
                 }
@@ -70,8 +74,10 @@ fn unarchive(input: &Path, output: &Path) -> anyhow::Result<()> {
     }
 }
 
-async fn check_updates(
+/// Checks for updates to repak, downloads new binary zip if needed and extracts it. Copies the repak-gui binary to the cwd.
+async fn update_repak(
     client: &Client,
+    current_dir: &Path,
     download_path: &Path,
     binary_path: &Path,
     checked_marker_path: &Path,
@@ -88,52 +94,76 @@ async fn check_updates(
 
     let remote_version = get_remote_version(&remote)?;
 
-    let download_and_unzip = async {
-        let Some(download) = find_download(remote.assets) else {
+    let download_and_extract = async {
+        let Some(downloads) = find_downloads(remote.assets) else {
             return Err(anyhow!("could not find download url"));
         };
 
         let download_start = Instant::now();
 
         let mut stdout = stdout().lock();
-        writeln!(stdout, "\nstarting download")?;
+        writeln!(stdout, "\nstarting downloads\n")?;
 
-        let downloaded = client.get(&download.browser_download_url).send().await?;
+        // clear the download path
+        if download_path.exists() {
+            fs::remove_dir_all(download_path)?;
+        }
+        fs::create_dir(download_path)?;
 
-        let download_size = downloaded
-            .content_length()
-            .ok_or(anyhow!("could not get content_length"))?;
+        for download in downloads {
+            let downloaded = client.get(&download.browser_download_url).send().await?;
 
-        let msg = format!("downloading {remote_version}/{}", download.name);
+            let download_size = downloaded
+                .content_length()
+                .ok_or(anyhow!("could not get content_length"))?;
 
-        let download_output = download_path.join(download.name);
-        let mut file = File::create(&download_output)?;
+            let msg = format!("downloading {remote_version}/{}", download.name);
 
-        let term_cols = termsize::get().map_or(0, |s| s.cols as usize);
-        let mut progress = 0;
+            let download_output = download_path.join(download.name);
+            let mut file = File::create(&download_output)?;
 
-        let mut bytes_stream = downloaded.bytes_stream();
-        while let Some(chunk) = bytes_stream.next().await {
-            let chunk = chunk?;
-            file.write_all(&chunk)?;
-            progress += chunk.len();
+            let term_cols = termsize::get().map_or(0, |s| s.cols as usize);
+            let mut progress = 0;
 
-            let msg = format!("\r{msg}, {} bytes left", download_size - progress as u64);
-            write!(stdout, "{msg}{}", " ".repeat(term_cols - msg.len()))?;
-            stdout.flush()?;
+            let mut bytes_stream = downloaded.bytes_stream();
+            while let Some(chunk) = bytes_stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk)?;
+                progress += chunk.len();
+
+                let msg = format!("\r{msg}, {} bytes left", download_size - progress as u64);
+                write!(stdout, "{msg}{}", " ".repeat(term_cols - msg.len()))?;
+                stdout.flush()?;
+            }
+
+            // close file
+            drop(file);
+
+            writeln!(stdout, "\ndone! took {:?}", download_start.elapsed())?;
+
+            if let Err(err) = extract_archive(&download_output, download_path) {
+                println!("failed to extract, errors: {}\n", get_error_chain(&err));
+            } else {
+                writeln!(stdout, "extracted.\n")?;
+            }
+
+            let repak_gui_path = if std::env::consts::OS == "windows" {
+                "repak-gui.exe"
+            } else {
+                "repak-gui"
+            };
+
+            if fs::exists(repak_gui_path).is_ok_and(|exist| exist) {
+                fs::remove_file(repak_gui_path)?;
+            }
+
+            fs::copy(
+                download_path.join(repak_gui_path),
+                current_dir.join(repak_gui_path),
+            )?;
         }
 
-        // close file
-        drop(file);
-
-        writeln!(stdout, "\ndone! took {:?}", download_start.elapsed())?;
-
-        if let Err(err) = unarchive(&download_output, download_path) {
-            println!("errors: {}\n", get_error_chain(&err));
-        }
-        writeln!(stdout, "extracted.\n")?;
-
-        // drop stdout lock
+        // drop stdout lock after we're done
         drop(stdout);
 
         Ok(())
@@ -143,7 +173,7 @@ async fn check_updates(
         Ok(local_version) => {
             if remote_version > local_version {
                 println!("found new version {remote_version}");
-                download_and_unzip.await?;
+                download_and_extract.await?;
                 println!("summary: repak {local_version} => {remote_version}");
             } else {
                 println!("you have the latest repak ({local_version})");
@@ -154,7 +184,7 @@ async fn check_updates(
                 "could not find local version!\nerrors: {}",
                 get_error_chain(&err)
             );
-            download_and_unzip.await?;
+            download_and_extract.await?;
             println!("summary: got the latest repak {remote_version}");
         }
     }
@@ -177,24 +207,19 @@ async fn inner_main() -> anyhow::Result<()> {
     let binary_path = download_path.join(BINARY_NAME);
     let checked_marker_path = download_path.join(CHECKED_MARKER_NAME);
 
-    let do_checks_and_download = async {
-        if !download_path.exists() {
-            fs::create_dir(&download_path)?;
-        }
-
+    let update_repak = async {
         // we are ok with update check failing
-        if let Err(err) = check_updates(
+        if let Err(err) = update_repak(
             &Client::new(),
+            current_dir,
             &download_path,
             &binary_path,
             &checked_marker_path,
         )
         .await
         {
-            println!(
-                "failed to check for updates!\nerrors: {}",
-                get_error_chain(&err)
-            );
+            println!("failed to check for updates!");
+            println!("errors: {}", get_error_chain(&err));
         }
 
         println!();
@@ -206,7 +231,7 @@ async fn inner_main() -> anyhow::Result<()> {
     // force update
     let args = if args.first().is_some_and(|a| a == "-U") {
         println!("forcing update checks.");
-        do_checks_and_download.await?;
+        update_repak.await?;
         // skip the -U
         &args[1..]
     } else {
@@ -224,9 +249,9 @@ async fn inner_main() -> anyhow::Result<()> {
                 );
             }
             // not less than `CHECK_COOLDOWN`
-            Some(_) => do_checks_and_download.await?,
+            Some(_) => update_repak.await?,
             // `CHECKED_MARKER` doesn't exist or something went wrong getting modified time.
-            None => do_checks_and_download.await?,
+            None => update_repak.await?,
         }
         &args
     };

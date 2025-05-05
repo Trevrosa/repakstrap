@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 /// A release's asset. Does not contain all fields.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ReleaseAsset {
     pub name: String,
     pub browser_download_url: String,

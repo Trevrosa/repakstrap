@@ -12,13 +12,15 @@ use semver::Version;
 
 pub const DOWNLOADS_NAME: &str = "dist";
 pub const CHECKED_MARKER_NAME: &str = "CHECKED";
+
 #[cfg(windows)]
 pub const BINARY_NAME: &str = "repak.exe";
 #[cfg(target_os = "linux")]
 pub const BINARY_NAME: &str = "repak";
+
 pub const APIKEY_ENV_VAR: &str = "REPAKSTRAP_APIKEY";
 
-/// Get a formatted error chain of an [`anyhow::Error`] in reverse.
+/// Get a formatted error chain of an [`anyhow::Error`] in reverse, so that it goes from left to right.
 pub fn get_error_chain(err: &anyhow::Error) -> String {
     err.chain()
         .rev()
@@ -58,26 +60,38 @@ pub fn get_local_version(binary_path: &Path) -> anyhow::Result<Version> {
     let cli_version = cli_version
         .trim()
         .split(' ')
-        .last()
+        .next_back()
         .ok_or(anyhow!("could not parse local version."))?;
 
     Ok(Version::parse(cli_version)?)
 }
 
 /// Find the correct [`ReleaseAsset`] to download from an [`Iterator`] of [`ReleaseAsset`]s according to the platform.
-pub fn find_download(assets: impl IntoIterator<Item = ReleaseAsset>) -> Option<ReleaseAsset> {
+///
+/// Lists both the gui and cli versions of repak.
+pub fn find_downloads(assets: impl IntoIterator<Item = ReleaseAsset>) -> Option<[ReleaseAsset; 2]> {
     #[cfg(windows)]
     const BINARY_END: &str = "windows-msvc.zip";
     #[cfg(target_os = "linux")]
     const BINARY_END: &str = "linux-gnu.tar.xz";
 
-    assets.into_iter().find(|a| a.name.ends_with(BINARY_END))
+    let downloads: Vec<ReleaseAsset> = assets
+        .into_iter()
+        .filter(|a| a.name.ends_with(BINARY_END))
+        .collect();
+
+    if downloads.len() == 2 {
+        Some([downloads[0].clone(), downloads[1].clone()])
+    } else {
+        None
+    }
 }
 
 /// Get the latest repak-rivals [`Release`].
 pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Result<Release> {
     const RELEASES_URL: &str =
         "https://api.github.com/repos/natimerry/repak-rivals/releases/latest";
+    // a random one
     const USER_AGENT: &str =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0";
     let request = client
@@ -96,7 +110,7 @@ pub async fn get_remote(client: &Client, api_key: Option<String>) -> anyhow::Res
     let resp = client.execute(request).await?;
     match resp.status() {
         StatusCode::FORBIDDEN => Err(anyhow!(
-            "got 403 on api request: {}",
+            "got 403 forbidden on api request: {}",
             resp.text().await.map_or_else(
                 |_| "no text could be parsed".to_string(),
                 |t| t.trim().to_string()
