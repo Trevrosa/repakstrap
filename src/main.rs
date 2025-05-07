@@ -141,6 +141,8 @@ async fn update_repak(
 
             writeln!(stdout, "\ndone! took {:?}", download_start.elapsed())?;
 
+            write!(stdout, "extracting..")?;
+            stdout.flush()?;
             if let Err(err) = extract_archive(&download_output, download_path) {
                 println!("failed to extract, errors: {}\n", get_error_chain(&err));
             } else {
